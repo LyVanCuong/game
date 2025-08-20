@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Game Bomber</title>
+<style>
+  body { 
+    margin: 0; 
+    background: #111; 
+    display: flex; 
+    justify-content: center; 
+    align-items: center; 
+    height: 100vh; 
+    overflow: hidden; 
+    touch-action: manipulation; 
+    font-family: Arial; 
+  }
+  canvas { 
+    background: #222; 
+    display: block; 
+    border: 2px solid #444; 
+    max-width: 100%; 
+    max-height: 100%; 
+  }
+  #restartBtn, #pauseBtn {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 15px 30px;
+    font-size: 20px;
+    background: #ff4081;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  #restartBtn { display: none; }
+  #pauseBtn { top: 20px; left: 20px; transform: none; font-size: 16px; }
+  #pauseMenu {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.8);
+    color: white;
+    padding: 20px;
+    border-radius: 10px;
+    display: none;
+    text-align: center;
+  }
+  .control-button {
+    position: absolute;
+    bottom: 10%;
+    width: 50px;
+    height: 50px;
+    background: rgba(255,255,255,0.3);
+    border: 1px solid white;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 50px;
+    font-size: 24px;
+    color: white;
+    user-select: none;
+  }
+  #up { left: 20%; bottom: 20%; }
+  #down { left: 20%; bottom: 5%; }
+  #left { left: 5%; bottom: 12.5%; }
+  #right { left: 35%; bottom: 12.5%; }
+  #bomb { right: 5%; bottom: 12.5%; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<button id="restartBtn">Chơi lại</button>
+<button id="pauseBtn">Tạm dừng</button>
+<div id="pauseMenu">
+  <h2>Game Tạm Dừng</h2>
+  <button onclick="resumeGame()">Tiếp tục</button>
+  <button onclick="initGame()">Chơi lại</button>
+</div>
+<div id="up" class="control-button">↑</div>
+<div id="down" class="control-button">↓</div>
+<div id="left" class="control-button">←</div>
+<div id="right" class="control-button">→</div>
+<div id="bomb" class="control-button">Bom</div>
+
+<script>
+// ==== CONFIG ====
+const TILE = 40;
+const ROWS = 13, COLS = 17;
+const PLAYER_SPEED = 120;        // px/s
+const ENEMY_SPEED = 100;         // px/s
+const BOMB_FUSE = 2000;          // ms
+const EXPLOSION_DURATION = 500;  // ms
+const MAX_LIVES = 3;
+const PROJECTILE_SPEED = 200;     // px/s
+const MAX_SHOTS = 5;             // Max shots
+const ENEMY_BOMB_COOLDOWN = 5000; // ms
+const ENEMY_COUNT = 3;           // Số lượng kẻ thù cố định
+
+// Canvas
+const canvas = document.getElementById("gameCanvas");
+canvas.width = COLS * TILE;
+canvas.height = ROWS * TILE + 40; // Extra for UI
+const ctx = canvas.getContext("2d");
+
+// ==== ASSETS ====
+const assets = {};
+const imagePaths = {
+  player: 'anh.png',
+  enemy_random: 'em.png',
+  enemy_chaser: 'em.png',
+  wall: 'tuong.png',
+  box: 'thung.png',
+  bomb_player: 'cut.png',
+  bomb_enemy: 'cut.png',
+  explosion: 'cut1.png',
+  projectile: 'dan.png',
+  shield: 'lachan.png',
+  range: 'mitom.png',
+  gun: 'sung.png',
+  ground: 'co.jpg'
+};
+
+function loadAssets(callback) {
+  let loaded = 0;
+  const total = Object.keys(imagePaths).length;
+  console.log(`Bắt đầu tải ${total} hình ảnh...`);
+  for (const [key, path] of Object.entries(imagePaths)) {
+    assets[key] = new Image();
+    assets[key].onload = () => {
+      console.log(`Đã tải thành công: ${path}`);
+      loaded++;
+      if (loaded === total) callback();
+    };
+    assets[key].onerror = () => {
+      console.error(`Lỗi tải ảnh: ${path}. Sử dụng hình vẽ thay thế.`);
+      assets[key] = null; // Đặt null để xử lý fallback
+      loaded++;
+      if (loaded === total) callback();
+    };
+    assets[key].src = path;
+  }
+}
+
+// ==== STATE ====
+let map, player, enemies, bombs, explosions, items, projectiles;
+let lastTime = performance.now();
+let score = 0;
+let lives = MAX_LIVES;
+let level = 1;
+let gamePaused = false;
+let gameOver = false;
+let gameWon = false;
+const touchControls = { up: false, down: false, left: false, right: false, bomb: false };
+
+// ==== ENTITIES ====
+const makeActor = (x, y) => ({
+  x, y, w: TILE - 8, h: TILE - 8,
+  bombRange: 2,
+  maxBombs: 1,
+  speed: PLAYER_SPEED,
+  alive: true,
+  lastDir: { x: 1, y: 0 },
+  shots: 0,
+  bombCooldown: 0,
+  fleeingUntil: 0
+});
+
+function spawnEnemy(type = 'random') {
+  let r, c, tries = 0;
+  do {
+    r = Math.floor(Math.random() * ROWS);
+    c = Math.floor(Math.random() * COLS);
+    tries++;
+  } while ((map[r][c] !== "empty" || (r === 1 && c === 1)) && tries < 200);
+  const en = makeActor(c * TILE, r * TILE);
+  en.cooldown = 0;
+  en.type = type;
+  en.bombCooldown = ENEMY_BOMB_COOLDOWN;
+  enemies.push(en);
+}
+
+function spawnItem(r, c) {
+  if (Math.random() < 0.3) {
+    const types = ['shield', 'range', 'gun'];
+    items.push({ r, c, type: types[Math.floor(Math.random() * types.length)] });
+  }
+}
+
+// ==== INIT GAME ====
+function initGame() {
+  map = [];
+  for (let r = 0; r < ROWS; r++) {
+    map[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      if (r === 0 || c === 0 || r === ROWS - 1 || c === COLS - 1 || (r % 2 === 0 && c % 2 === 0)) map[r][c] = "wall";
+      else if (Math.random() < 0.25) map[r][c] = "box";
+      else map[r][c] = "empty";
+    }
+  }
+  map[1][1] = map[1][2] = map[2][1] = "empty";
+
+  player = makeActor(TILE, TILE);
+  player.maxBombs = 1;
+  player.bombRange = 2;
+  player.speed = PLAYER_SPEED;
+  player.shots = 0;
+  enemies = [];
+  for (let i = 0; i < ENEMY_COUNT; i++) {
+    spawnEnemy(Math.random() < 0.5 ? 'random' : 'chaser');
+  }
+  bombs = [];
+  explosions = [];
+  items = [];
+  projectiles = [];
+  score = 0;
+  lives = MAX_LIVES;
+  level = 1;
+  gamePaused = false;
+  gameOver = false;
+  gameWon = false;
+  document.getElementById("restartBtn").style.display = "none";
+  document.getElementById("pauseMenu").style.display = "none";
+  document.getElementById("pauseBtn").style.display = "block";
+  console.log("Game đã khởi động với 3 kẻ thù.");
+}
+
+// ==== INPUT ====
+const buttons = ['up', 'down', 'left', 'right', 'bomb'];
+buttons.forEach(btn => {
+  document.getElementById(btn).addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (gamePaused || gameOver || gameWon) return;
+    touchControls[btn] = true;
+    if (btn === 'bomb') placeBomb(player);
+  });
+  document.getElementById(btn).addEventListener('touchend', (e) => {
+    e.preventDefault();
+    touchControls[btn] = false;
+  });
+});
+
+// ==== HELPERS ====
+function pixelToTile(x, y) { return [Math.floor(y / TILE), Math.floor(x / TILE)]; }
+function rectOverlapsTile(x, y, w, h, r, c) {
+  const tx = c * TILE, ty = r * TILE;
+  return !(x + w <= tx || x >= tx + TILE || y + h <= ty || y >= ty + TILE);
+}
+function canMoveTo(actor, nx, ny) {
+  const { w, h } = actor;
+  const left = Math.floor(nx / TILE);
+  const right = Math.floor((nx + w - 1) / TILE);
+  const top = Math.floor(ny / TILE);
+  const bottom = Math.floor((ny + h - 1) / TILE);
+  for (let r = top; r <= bottom; r++) {
+    for (let c = left; c <= right; c++) {
+      if (r < 0 || c < 0 || r >= ROWS || c >= COLS) return false;
+      if (map[r][c] === "wall" || map[r][c] === "box") return false;
+      const b = bombs.find(bb => bb.r === r && bb.c === c);
+      if (b) {
+        if (b.ghostActive && b.ghostOwner === actor && rectOverlapsTile(nx, ny, w, h, r, c)) continue;
+        else return false;
+      }
+    }
+  }
+  return true;
+}
+function frontTileOrSelf(actor) {
+  const [r, c] = pixelToTile(actor.x + actor.w / 2, actor.y + actor.h / 2);
+  let fr = r + Math.sign(actor.lastDir.y), fc = c + Math.sign(actor.lastDir.x);
+  if (fr < 0 || fc < 0 || fr >= ROWS || fc >= COLS || map[fr][fc] !== "empty" || bombs.some(b => b.r === fr && b.c === fc)) {
+    return [r, c];
+  }
+  return [fr, fc];
+}
+function canFleeFromBomb(en, bomb) {
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const bombX = bomb.c * TILE + TILE / 2;
+  const bombY = bomb.r * TILE + TILE / 2;
+  for (const [dx, dy] of dirs) {
+    const nx = en.x + dx * TILE, ny = en.y + dy * TILE;
+    if (canMoveTo(en, nx, ny)) {
+      const dist = Math.hypot(nx - bombX, ny - bombY);
+      if (dist > Math.hypot(en.x - bombX, en.y - bombY)) return true;
+    }
+  }
+  return false;
+}
+
+// ==== BOMB ====
+function placeBomb(owner) {
+  if (!owner.alive || bombs.filter(b => b.owner === owner).length >= owner.maxBombs) return;
+  let [tr, tc] = frontTileOrSelf(owner);
+  if (bombs.some(b => b.r === tr && b.c === tc)) return;
+  if (owner !== player) {
+    const [pr, pc] = pixelToTile(player.x + player.w / 2, player.y + player.h / 2);
+    const dist = Math.max(Math.abs(tr - pr), Math.abs(tc - pc));
+    if (dist > owner.bombRange || !canFleeFromBomb(owner, { r: tr, c: tc })) return;
+  }
+  const bomb = {
+    r: tr,
+    c: tc,
+    range: owner === player ? owner.bombRange : 2,
+    explodeAt: performance.now() + BOMB_FUSE,
+    ghostOwner: owner,
+    ghostActive: true,
+    owner
+  };
+  bombs.push(bomb);
+  if (owner !== player) {
+    owner.bombCooldown = ENEMY_BOMB_COOLDOWN;
+    owner.fleeingUntil = performance.now() + BOMB_FUSE;
+  }
+}
+function explodeBomb(b) {
+  bombs = bombs.filter(x => x !== b);
+  const cells = [[b.r, b.c]];
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (const [dr, dc] of dirs) {
+    for (let i = 1; i <= b.range; i++) {
+      const nr = b.r + dr * i, nc = b.c + dc * i;
+      if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) break;
+      if (map[nr][nc] === "wall") break;
+      cells.push([nr, nc]);
+      if (map[nr][nc] === "box") {
+        map[nr][nc] = "empty";
+        score += b.owner === player ? 50 : 0;
+        spawnItem(nr, nc);
+        break;
+      }
+    }
+  }
+  explosions.push({ cells, endAt: performance.now() + EXPLOSION_DURATION });
+  const hit = actor => {
+    const ar = Math.floor((actor.y + actor.h / 2) / TILE);
+    const ac = Math.floor((actor.x + actor.w / 2) / TILE);
+    if (cells.some(([r, c]) => r === ar && c === ac)) {
+      actor.alive = false;
+      if (actor === player) {
+        lives--;
+        if (lives > 0) {
+          setTimeout(respawnPlayer, 1000);
+        } else {
+          gameOver = true;
+        }
+      } else if (b.owner === player) {
+        score += 100;
+      }
+    }
+  };
+  if (player.alive) hit(player);
+  enemies.forEach(en => { if (en.alive) hit(en); });
+  if (enemies.every(en => !en.alive)) {
+    level++;
+    setTimeout(nextLevel, 1000);
+  }
+}
+
+// ==== RESPAWN ====
+function respawnPlayer() {
+  player = makeActor(TILE, TILE);
+  player.maxBombs = 1;
+  player.bombRange = 2;
+  player.speed = PLAYER_SPEED;
+  player.shots = 0;
+  player.alive = true;
+  console.log("Người chơi đã respawn.");
+}
+
+// ==== SHOOTING ====
+function shoot(owner) {
+  if (owner.shots <= 0) return;
+  owner.shots--;
+  const [r, c] = pixelToTile(owner.x + owner.w / 2, owner.y + owner.h / 2);
+  let vx = 0, vy = 0;
+  if (touchControls.up) vy = -1;
+  else if (touchControls.down) vy = 1;
+  else if (touchControls.left) vx = -1;
+  else if (touchControls.right) vx = 1;
+  if (vx === 0 && vy === 0) {
+    vx = owner.lastDir.x;
+    vy = owner.lastDir.y;
+  }
+  if (vx === 0 && vy === 0) {
+    vx = 1;
+  }
+  if (vx !== 0 && vy !== 0) {
+    vx *= Math.SQRT1_2;
+    vy *= Math.SQRT1_2;
+  }
+  projectiles.push({
+    x: c * TILE + TILE / 2,
+    y: r * TILE + TILE / 2,
+    vx: vx * PROJECTILE_SPEED,
+    vy: vy * PROJECTILE_SPEED,
+    alive: true
+  });
+}
+
+function updateProjectiles(dt) {
+  projectiles.forEach(p => {
+    if (!p.alive) return;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    const [r, c] = pixelToTile(p.x, p.y);
+    if (r < 0 || c < 0 || r >= ROWS || c >= COLS || map[r][c] === "wall") {
+      p.alive = false;
+      return;
+    }
+    if (map[r][c] === "box") {
+      map[r][c] = "empty";
+      score += 50;
+      spawnItem(r, c);
+      p.alive = false;
+      return;
+    }
+    enemies.forEach(en => {
+      if (en.alive && rectOverlapsTile(en.x, en.y, en.w, en.h, r, c)) {
+        en.alive = false;
+        score += 100;
+        p.alive = false;
+      }
+    });
+  });
+  projectiles = projectiles.filter(p => p.alive);
+  if (enemies.every(en => !en.alive)) {
+    level++;
+    setTimeout(nextLevel, 1000);
+  }
+}
+
+// ==== ITEMS ====
+function collectItem(actor) {
+  const [ar, ac] = pixelToTile(actor.x + actor.w / 2, actor.y + actor.h / 2);
+  const itemIndex = items.findIndex(item => item.r === ar && item.c === ac);
+  if (itemIndex !== -1) {
+    const item = items[itemIndex];
+    if (item.type === 'shield') {
+      lives = Math.min(lives + 1, MAX_LIVES + 2);
+    } else if (item.type === 'range') {
+      player.bombRange++;
+    } else if (item.type === 'gun') {
+      player.shots += MAX_SHOTS;
+    }
+    score += 200;
+    items.splice(itemIndex, 1);
+  }
+}
+
+// ==== ENEMY AI ====
+function updateEnemy(en, dt) {
+  if (!en.alive) return;
+  if (en.cooldown > 0) {
+    en.cooldown -= dt * 1000;
+  }
+  if (en.bombCooldown > 0) {
+    en.bombCooldown -= dt * 1000;
+  } else {
+    const distToPlayer = Math.hypot(player.x - en.x, player.y - en.y);
+    if (distToPlayer < 3 * TILE || Math.random() < 0.01) {
+      placeBomb(en);
+    }
+  }
+  if (en.cooldown > 0) return;
+  let vx = 0, vy = 0;
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  if (en.fleeingUntil > performance.now()) {
+    const ownBomb = bombs.find(b => b.owner === en && b.ghostActive);
+    if (ownBomb) {
+      const bombX = ownBomb.c * TILE + TILE / 2;
+      const bombY = ownBomb.r * TILE + TILE / 2;
+      const possibleDirs = dirs
+        .map(d => ({ dx: d[0], dy: d[1], dist: Math.hypot((en.x + d[0] * TILE) - bombX, (en.y + d[1] * TILE) - bombY) }))
+        .filter(d => canMoveTo(en, en.x + d.dx * TILE, en.y + d.dy * TILE))
+        .sort((a, b) => b.dist - a.dist);
+      if (possibleDirs.length > 0) {
+        vx = possibleDirs[0].dx;
+        vy = possibleDirs[0].dy;
+      }
+    }
+  } else {
+    const possibleDirs = dirs.filter(d => canMoveTo(en, en.x + d[0] * TILE, en.y + d[1] * TILE));
+    if (possibleDirs.length === 0) return;
+    if (en.type === 'chaser') {
+      const dx = player.x - en.x, dy = player.y - en.y;
+      const primary = Math.abs(dx) > Math.abs(dy) ? [Math.sign(dx), 0] : [0, Math.sign(dy)];
+      if (canMoveTo(en, en.x + primary[0] * TILE, en.y + primary[1] * TILE)) {
+        vx = primary[0];
+        vy = primary[1];
+      } else {
+        const fallback = possibleDirs[Math.floor(Math.random() * possibleDirs.length)];
+        vx = fallback[0];
+        vy = fallback[1];
+      }
+    } else {
+      const [dir] = possibleDirs.sort(() => Math.random() - 0.5);
+      vx = dir[0];
+      vy = dir[1];
+    }
+  }
+  if (vx || vy) {
+    en.lastDir.x = vx;
+    en.lastDir.y = vy;
+  }
+  const move = ENEMY_SPEED * dt;
+  if (canMoveTo(en, en.x + vx * move, en.y)) en.x += vx * move;
+  if (canMoveTo(en, en.x, en.y + vy * move)) en.y += vy * move;
+  en.cooldown = 200; // Giảm cooldown để di chuyển mượt hơn
+}
+
+// ==== LEVELS ====
+function nextLevel() {
+  player = makeActor(TILE, TILE);
+  player.maxBombs = Math.max(1, player.maxBombs);
+  player.bombRange = Math.max(2, player.bombRange);
+  player.speed = PLAYER_SPEED;
+  player.shots = Math.max(0, player.shots);
+  enemies = [];
+  for (let i = 0; i < ENEMY_COUNT; i++) {
+    spawnEnemy(Math.random() < 0.5 ? 'random' : 'chaser');
+  }
+  bombs = [];
+  explosions = [];
+  items = [];
+  projectiles = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (r === 0 || c === 0 || r === ROWS - 1 || c === COLS - 1 || (r % 2 === 0 && c % 2 === 0)) map[r][c] = "wall";
+      else if (Math.random() < 0.25) map[r][c] = "box";
+      else map[r][c] = "empty";
+    }
+  }
+  map[1][1] = map[1][2] = map[2][1] = "empty";
+}
+
+// ==== UPDATE ====
+function update(dt) {
+  if (gamePaused || gameOver || gameWon) return;
+
+  // Player movement
+  let vx = 0, vy = 0;
+  if (touchControls.up) vy = -1;
+  else if (touchControls.down) vy = 1;
+  else if (touchControls.left) vx = -1;
+  else if (touchControls.right) vx = 1;
+  if (vx && vy) {
+    vx *= Math.SQRT1_2;
+    vy *= Math.SQRT1_2;
+  }
+  if (vx || vy) {
+    player.lastDir.x = vx;
+    player.lastDir.y = vy;
+  }
+  const move = player.speed * dt;
+  if (canMoveTo(player, player.x + vx * move, player.y)) player.x += vx * move;
+  if (canMoveTo(player, player.x, player.y + vy * move)) player.y += vy * move;
+
+  // Bomb logic
+  bombs = bombs.filter(b => {
+    if (performance.now() >= b.explodeAt) {
+      explodeBomb(b);
+      return false;
+    }
+    if (b.ghostActive && performance.now() >= b.explodeAt - 500) {
+      b.ghostActive = false;
+    }
+    return true;
+  });
+
+  // Explosion duration
+  explosions = explosions.filter(ex => performance.now() < ex.endAt);
+
+  // Enemy AI
+  enemies.forEach(en => updateEnemy(en, dt));
+
+  // Projectiles
+  updateProjectiles(dt);
+
+  // Items
+  collectItem(player);
+
+  // Check win/lose
+  if (lives <= 0) gameOver = true;
+  if (enemies.every(en => !en.alive) && level >= 5) gameWon = true;
+}
+
+// ==== RENDER ====
+function render() {
+  console.log("Đang vẽ frame...");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Map
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = c * TILE, y = r * TILE;
+      if (map[r][c] === "wall") {
+        if (assets.wall && assets.wall.complete) {
+          ctx.drawImage(assets.wall, x, y, TILE, TILE);
+        } else {
+          ctx.fillStyle = "#555";
+          ctx.fillRect(x, y, TILE, TILE);
+          ctx.strokeStyle = "#777";
+          ctx.strokeRect(x, y, TILE, TILE);
+        }
+      } else if (map[r][c] === "box") {
+        if (assets.box && assets.box.complete) {
+          ctx.drawImage(assets.box, x, y, TILE, TILE);
+        } else {
+          ctx.fillStyle = "#8b5a2b";
+          ctx.fillRect(x, y, TILE, TILE);
+          ctx.strokeStyle = "#a67c00";
+          ctx.strokeRect(x, y, TILE, TILE);
+        }
+      } else if (assets.ground && assets.ground.complete) {
+        ctx.drawImage(assets.ground, x, y, TILE, TILE);
+      } else {
+        ctx.fillStyle = "#333";
+        ctx.fillRect(x, y, TILE, TILE);
+      }
+    }
+  }
+
+  // Bombs
+  bombs.forEach(b => {
+    const x = b.c * TILE, y = b.r * TILE;
+    const img = b.owner === player ? assets.bomb_player : assets.bomb_enemy;
+    if (img && img.complete) {
+      ctx.globalAlpha = b.ghostActive ? 0.55 : 1.0;
+      ctx.drawImage(img, x, y, TILE, TILE);
+      ctx.globalAlpha = 1.0;
+    } else {
+      ctx.beginPath();
+      ctx.fillStyle = b.ghostActive ? "rgba(0,0,0,0.55)" : b.owner === player ? "#000" : "#900";
+      ctx.arc(b.c * TILE + TILE / 2, b.r * TILE + TILE / 2, TILE * 0.28, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+    }
+  });
+
+  // Explosions
+  explosions.forEach(ex => {
+    if (assets.explosion && assets.explosion.complete) {
+      ex.cells.forEach(([r, c]) => ctx.drawImage(assets.explosion, c * TILE, r * TILE, TILE, TILE));
+    } else {
+      ctx.fillStyle = "rgba(255,140,20,0.9)";
+      ex.cells.forEach(([r, c]) => ctx.fillRect(c * TILE, r * TILE, TILE, TILE));
+    }
+  });
+
+  // Items
+  items.forEach(item => {
+    const x = item.c * TILE + TILE / 4, y = item.r * TILE + TILE / 4;
+    const img = assets[item.type];
+    if (img && img.complete) {
+      ctx.drawImage(img, x, y, TILE / 2, TILE / 2);
+    } else {
+      ctx.fillStyle = item.type === 'shield' ? '#00f' : item.type === 'range' ? '#f0f' : '#ff0';
+      ctx.beginPath();
+      if (item.type === 'shield') {
+        ctx.moveTo(x + TILE / 4, y);
+        ctx.lineTo(x + TILE / 2, y + TILE / 8);
+        ctx.lineTo(x + TILE / 2.5, y + TILE / 2);
+        ctx.lineTo(x + TILE / 6, y + TILE / 2);
+        ctx.lineTo(x, y + TILE / 8);
+        ctx.closePath();
+      } else if (item.type === 'range') {
+        ctx.moveTo(x + TILE / 4, y);
+        ctx.lineTo(x + TILE / 2, y + TILE / 3);
+        ctx.lineTo(x, y + TILE / 3);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x + TILE / 4, y + TILE / 6);
+        ctx.lineTo(x + TILE / 2.5, y + TILE / 2);
+        ctx.lineTo(x + TILE / 6, y + TILE / 2);
+        ctx.closePath();
+      } else if (item.type === 'gun') {
+        ctx.fillRect(x, y + TILE / 8, TILE / 2, TILE / 4);
+        ctx.fillRect(x + TILE / 2, y + TILE / 6, TILE / 4, TILE / 8);
+      }
+      ctx.fill();
+    }
+  });
+
+  // Projectiles
+  projectiles.forEach(p => {
+    if (assets.projectile && assets.projectile.complete) {
+      ctx.drawImage(assets.projectile, p.x - TILE / 8, p.y - TILE / 8, TILE / 4, TILE / 4);
+    } else {
+      ctx.fillStyle = "#ff0";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, TILE / 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Player
+  if (player.alive) {
+    if (assets.player && assets.player.complete) {
+      ctx.drawImage(assets.player, player.x, player.y, player.w, player.h);
+    } else {
+      ctx.fillStyle = "#2EE6C6";
+      ctx.beginPath();
+      ctx.arc(player.x + player.w / 2, player.y + player.h / 2, player.w / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Enemies
+  enemies.forEach(en => {
+    if (!en.alive) return;
+    const img = en.type === 'chaser' ? assets.enemy_chaser : assets.enemy_random;
+    if (img && img.complete) {
+      ctx.drawImage(img, en.x, en.y, en.w, en.h);
+    } else {
+      ctx.fillStyle = en.type === 'chaser' ? "#E64B4B" : "#ff9900";
+      ctx.fillRect(en.x, en.y, en.w, en.h);
+    }
+  });
+
+  // UI
+  ctx.fillStyle = "#222";
+  ctx.fillRect(0, ROWS * TILE, canvas.width, 40);
+  ctx.fillStyle = "#fff";
+  ctx.font = "16px Arial";
+  ctx.fillText(`Điểm: ${score}`, 10, ROWS * TILE + 25);
+  ctx.fillText(`Mạng: ${lives}`, 150, ROWS * TILE + 25);
+  ctx.fillText(`Cấp: ${level}`, 300, ROWS * TILE + 25);
+  ctx.fillText(`Đạn: ${player.shots}`, 450, ROWS * TILE + 25);
+  if (gameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ff4081";
+    ctx.font = "30px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("Game Over!", canvas.width / 2, canvas.height / 2 - 20);
+  }
+  if (gameWon) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#2EE6C6";
+    ctx.font = "30px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("You Win!", canvas.width / 2, canvas.height / 2 - 20);
+  }
+  ctx.textAlign = "left";
+}
+
+// ==== PAUSE ====
+function togglePause() {
+  gamePaused = !gamePaused;
+  document.getElementById("pauseMenu").style.display = gamePaused ? "block" : "none";
+  document.getElementById("pauseBtn").textContent = gamePaused ? "Tiếp tục" : "Tạm dừng";
+}
+function resumeGame() {
+  gamePaused = false;
+  document.getElementById("pauseMenu").style.display = "none";
+  document.getElementById("pauseBtn").textContent = "Tạm dừng";
+}
+
+// ==== LOOP ====
+function loop(now) {
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+  update(dt);
+  render();
+  if (!gamePaused && !gameOver && !gameWon) requestAnimationFrame(loop);
+}
+
+// ==== START ====
+loadAssets(() => {
+  console.log("Tất cả hình ảnh đã tải, bắt đầu game.");
+  initGame();
+  requestAnimationFrame(t => { lastTime = t; loop(t); });
+});
+document.getElementById("restartBtn").addEventListener("click", () => {
+  initGame();
+  requestAnimationFrame(t => { lastTime = t; loop(t); });
+});
+document.getElementById("pauseBtn").addEventListener("click", togglePause);
+</script>
+</body>
+</html>
